@@ -42,6 +42,24 @@ El universo de datos está organizado en catálogos por capas de calidad. Siempr
 - **Retail**: Canal presencial en tiendas físicas. Proveedores: FIRST, Betconstruct.
 - **Teleservicio**: Canal por operador/agente. Datos en schema `mvt`.
 
+### Tablas Streaming (`tm_s_...`)
+
+Las tablas de streaming son el equivalente en tiempo real de las tablas `tm_d_...`. Comparten exactamente las mismas columnas, incluyendo columnas `_pe` de hora Perú.
+
+| Patrón | Descripción | Cuándo usar |
+|--------|-------------|-------------|
+| `tm_d_...` | Tablas históricas procesadas (día cerrado) | Días anteriores al día de hoy |
+| `tm_s_...` | Tablas streaming (tiempo real, día en curso) | El día de hoy — datos aún no cerrados |
+
+**Tablas streaming confirmadas**:
+- `dlh_silver.calimaco.tm_s_movements` — mismas columnas que `tm_d_movements`
+- `dlh_silver.calimaco.tm_s_operations` — mismas columnas que `tm_d_operations`
+- `dlh_silver.calimaco.tm_s_users_promotions` — mismas columnas que `tm_d_users_promotions`
+
+**Regla de uso**: Para queries que abarcan días históricos + el día de hoy, usar `UNION ALL` entre la tabla `tm_d_...` (días anteriores) y la `tm_s_...` (hoy).
+
+> ⚠️ `tm_d_daily_summary_users_details` **NO tiene equivalente streaming** — es una tabla resumen que solo se genera cuando el día cierra. Para el día en curso, calcular desde `tm_s_movements` + `tm_s_operations` usando `account` para distinguir CASH de CASINO-BONUS y `machine IS NOT NULL AND machine NOT IN ('27453', '27469')` para identificar casino.
+
 ---
 
 ## Cómo usar esta skill
