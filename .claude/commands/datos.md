@@ -1691,6 +1691,159 @@ tm_d_tickets  ──(unit_extId = entityExtId ⚠️)──  tm_d_get_earning  �
 
 ---
 
+## CATÁLOGO DE TABLAS — dlh_silver.simulcast
+
+> Schema del proveedor **Simulcast** (hípica/carreras de caballos). Exclusivo del canal **Retail**.
+
+---
+
+### simulcast.tm_d_bets_detail
+**Ruta completa**: `dlh_silver.simulcast.tm_d_bets_detail`
+
+> **Descripción**: Detalle de transacciones de apuestas hípicas (Simulcast) en el canal Retail. Cada fila representa una transacción individual — un ticket puede tener múltiples transacciones.
+> **Granularidad**: 1 fila = 1 transacción (`transaction_id`). Varios `transaction_id` pueden pertenecer al mismo `ticket_id`.
+> **Canal**: Retail — Simulcast
+> **Producto**: Siempre `'hipica'` — tabla exclusiva de carreras de caballos
+> **Moneda**: Soles directamente (no centavos)
+> **Fechas**: Todas en UTC (`+00:00`) — **no tiene columnas `_pe`**. Convertir con `FROM_UTC_TIMESTAMP(col, 'America/Lima')`
+
+| Columna | Tipo | Descripción | Valores / Notas |
+|---------|------|-------------|-----------------|
+| `transaction_id` | STRING | ID único de la transacción | PK |
+| `ticket_id` | STRING | ID del ticket | Un ticket puede tener múltiples transacciones |
+| `canal` | STRING | Canal | Siempre `'Retail'` |
+| `producto` | STRING | Producto | Siempre `'hipica'` |
+| `terminal_id` | STRING | ID del terminal donde se realizó la apuesta | — |
+| `local_id_bets` | STRING | ID de la tienda donde se realizó la apuesta | ✅ Usar para métricas de tienda (apuestas) |
+| `local_id_paid` | STRING | ID de la tienda donde se cobró el premio | Puede diferir de `local_id_bets` si el jugador cobra en otra tienda |
+| `Amount` | DOUBLE | Monto apostado **en soles** | ✅ Apostado Simulcast |
+| `amount_won` | DOUBLE | Monto ganado **en soles** | GGR = `Amount - amount_won` (para bets válidos) |
+| `flag_anulado` | INT | Indica si la transacción fue anulada | `0` = válida ✅ · `1` = anulada ❌ — filtrar siempre `flag_anulado = 0` |
+| `paid_status` | INT | Indica si el premio fue pagado | `1` = pagado · `0` = no pagado |
+| `ticket_transaction_status` | INT | Estado de la transacción del ticket | Valores: `0`-`4` y `null` — ⚠️ significado pendiente de confirmar |
+| `bet_status` | INT | Estado de la apuesta | Valores: `0`-`4` y `null` — ⚠️ significado pendiente de confirmar |
+| `track_name` | STRING | Nombre del hipódromo/carrera | Nombre del evento hípico |
+| `track_event_id` | TIMESTAMP | Fecha del evento (carrera) | Formato UTC: `2023-01-28T00:00:00.000+00:00`. Convertir con `FROM_UTC_TIMESTAMP` |
+| `track_id` | STRING | ID del hipódromo | ⚠️ Siempre `null` — ignorar |
+| `creation_date` | TIMESTAMP | Fecha de creación de la transacción (UTC) | ✅ Usar para filtrar por fecha de apuesta. Convertir: `FROM_UTC_TIMESTAMP(creation_date, 'America/Lima')` |
+| `calc_date` | TIMESTAMP | Fecha de cálculo/resolución (UTC) | Cuando se determinó el resultado |
+| `paid_date` | TIMESTAMP | Fecha de pago del premio (UTC) | Solo aplica cuando `paid_status = 1` |
+| `Updated_at` | TIMESTAMP | Fecha de última actualización (UTC) | Columna técnica |
+
+**Filtros estándar por caso de uso**:
+```sql
+-- Solo transacciones válidas (excluir anuladas — obligatorio)
+WHERE flag_anulado = 0
+
+-- Apostado y GGR Simulcast del día
+SELECT
+  DATE(FROM_UTC_TIMESTAMP(creation_date, 'America/Lima')) AS fecha,
+  COUNT(DISTINCT ticket_id)                               AS tickets,
+  SUM(Amount)                                             AS apostado,
+  SUM(Amount - amount_won)                                AS ggr
+FROM dlh_silver.simulcast.tm_d_bets_detail
+WHERE flag_anulado = 0
+  AND DATE(FROM_UTC_TIMESTAMP(creation_date, 'America/Lima')) = '2026-06-01'
+GROUP BY DATE(FROM_UTC_TIMESTAMP(creation_date, 'America/Lima'))
+
+-- Tiendas activas Simulcast
+SELECT
+  DATE(FROM_UTC_TIMESTAMP(creation_date, 'America/Lima')) AS fecha,
+  COUNT(DISTINCT local_id_bets)                           AS tiendas_activas
+FROM dlh_silver.simulcast.tm_d_bets_detail
+WHERE flag_anulado = 0
+GROUP BY DATE(FROM_UTC_TIMESTAMP(creation_date, 'America/Lima'))
+```
+
+**Advertencias**:
+- ⚠️ **Filtrar siempre `flag_anulado = 0`** — las anuladas deben excluirse de cualquier análisis
+- ⚠️ **Todas las fechas están en UTC** — siempre usar `FROM_UTC_TIMESTAMP(col, 'America/Lima')` para hora Perú. Esta tabla NO tiene columnas `_pe`
+- ⚠️ Para contar **tickets únicos** usar `COUNT(DISTINCT ticket_id)` — no `COUNT(transaction_id)` ya que un ticket puede tener múltiples transacciones
+- ⚠️ `ticket_transaction_status` y `bet_status` tienen valores `0`-`4` con significado desconocido — pendiente confirmar cuáles son válidos/inválidos
+- ⚠️ `track_id` siempre `null` — usar `track_name` para identificar el hipódromo
+- ⚠️ Montos ya en **soles** — no dividir entre 100
+
+---
+
+### simulcast.tm_d_tickets
+**Ruta completa**: `dlh_silver.simulcast.tm_d_tickets`
+
+> **Descripción**: Detalle de tickets de Simulcast orientado al jugador. Complementa `tm_d_bets_detail` con el `user_id` del jugador, nombre del local y combinaciones de apuesta. Tiene columnas `_pe` propias para hora Perú.
+> **Granularidad**: 1 fila = 1 transacción (`id` / `transaction_id`)
+> **Canal**: Retail — Simulcast
+> **Moneda**: Soles directamente (no centavos)
+> **Fechas**: Tiene columnas `_pe` en formato TIMESTAMP (`2026-06-14 11:05:48.000`) — usar estas directamente
+
+| Columna | Tipo | Descripción | Valores / Notas |
+|---------|------|-------------|-----------------|
+| `id` | STRING | ID único de la fila | PK interno |
+| `transaction_id` | STRING | ID de la transacción | FK hacia `tm_d_bets_detail.transaction_id` |
+| `ticket_id` | STRING | ID del ticket | Un ticket puede tener múltiples transacciones |
+| `user_id` | STRING | ID del jugador | ⚠️ Pendiente confirmar si se relaciona con `user` de calimaco |
+| `transaction_type` | INT | Tipo de transacción | Valores `0`-`10` — ⚠️ significado pendiente de confirmar |
+| `terminal_id` | STRING | ID del terminal | — |
+| `local_id` | STRING | ID de la tienda | ✅ Usar para contar tiendas únicas |
+| `location_name` | STRING | Nombre de la tienda | Texto descriptivo del local |
+| `currency_id` | STRING | Moneda | Siempre `'PEN'` |
+| `amount` | DOUBLE | Monto apostado **en soles** | ✅ Apostado Simulcast |
+| `amount_won` | DOUBLE | Monto ganado **en soles** | GGR = `amount - amount_won` |
+| `combinations` | INT | Número de combinaciones de la apuesta | — |
+| `ticket_transaction_status` | INT | Estado de la transacción del ticket | Valores `0`-`4` y `null` — ⚠️ significado pendiente de confirmar |
+| `bet_status` | INT | Estado de la apuesta | Valores `0`-`2` y `null` — ⚠️ significado pendiente (rango distinto al de `tm_d_bets_detail`) |
+| `track_name` | STRING | Nombre del hipódromo/carrera | — |
+| `track_event_id` | TIMESTAMP | Fecha del evento en UTC | ⚠️ Usar `track_event_id_pe` |
+| `track_event_id_pe` | TIMESTAMP | Fecha del evento en hora Perú | Formato `2026-06-14 11:05:48.000` |
+| `creation_date` | TIMESTAMP | Fecha de creación en UTC | ⚠️ Usar `creation_date_pe` |
+| `creation_date_pe` | TIMESTAMP | Fecha de creación en hora Perú | ✅ Usar para filtrar por fecha de apuesta. Formato `2026-06-14 11:05:48.000` |
+| `created_at` | TIMESTAMP | Timestamp de inserción en UTC | ⚠️ Usar `created_at_pe` |
+| `created_at_pe` | TIMESTAMP | Timestamp de inserción en hora Perú | — |
+| `updated_at` | TIMESTAMP | Última actualización en UTC | ⚠️ Usar `updated_at_pe` |
+| `updated_at_pe` | TIMESTAMP | Última actualización en hora Perú | — |
+
+**Filtros estándar por caso de uso**:
+```sql
+-- Apostado y GGR Simulcast del día (usar creation_date_pe)
+SELECT
+  DATE(creation_date_pe)           AS fecha,
+  COUNT(DISTINCT ticket_id)        AS tickets,
+  COUNT(DISTINCT user_id)          AS jugadores,
+  COUNT(DISTINCT local_id)         AS tiendas,
+  SUM(amount)                      AS apostado,
+  SUM(amount - amount_won)         AS ggr
+FROM dlh_silver.simulcast.tm_d_tickets
+WHERE DATE(creation_date_pe) = '2026-06-01'
+GROUP BY DATE(creation_date_pe)
+```
+
+**Relación entre las dos tablas Simulcast**:
+```
+tm_d_tickets ──(transaction_id)──> tm_d_bets_detail
+             ──(ticket_id)───────> tm_d_bets_detail
+
+tm_d_tickets  → orientada al jugador (user_id, location_name, combinations)
+tm_d_bets_detail → orientada al pago (flag_anulado, paid_status, local_id_bets vs local_id_paid)
+```
+
+**¿Qué tabla usar para cada métrica?**
+
+| Métrica | Tabla recomendada | Motivo |
+|---------|-------------------|--------|
+| Apostado, GGR, TX | `tm_d_tickets` | Tiene `_pe` columns directas |
+| Jugadores únicos | `tm_d_tickets` | Tiene `user_id` |
+| Tiendas activas | `tm_d_tickets` | `local_id` + `location_name` |
+| Anulados | `tm_d_bets_detail` | Tiene `flag_anulado` explícito |
+| Pagos/cobros | `tm_d_bets_detail` | Tiene `paid_status`, `local_id_paid` |
+
+**Advertencias**:
+- ⚠️ Usar siempre columnas `_pe` para fechas — nunca las columnas UTC sin convertir
+- ⚠️ `_pe` son TIMESTAMP — usar `DATE()` al filtrar por día
+- ⚠️ Para contar **tickets únicos** usar `COUNT(DISTINCT ticket_id)` — no contar filas directamente
+- ⚠️ `transaction_type` (0-10) y `bet_status` (0-2) pendientes de confirmar significado — no filtrar por estos campos hasta clarificar
+- ⚠️ `user_id` pendiente confirmar si tiene relación con `user` de calimaco
+- ⚠️ Esta tabla no tiene `flag_anulado` — para filtrar anulados cruzar con `tm_d_bets_detail`
+
+---
+
 ## GLOSARIO DE TÉRMINOS
 
 | Término de negocio | Equivalente técnico | Tabla/Columna |

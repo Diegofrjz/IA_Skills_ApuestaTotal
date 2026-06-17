@@ -136,7 +136,9 @@ SELECT fecha, valor FROM (nivel 2) WHERE rn = 1
 | Schema `golden_race` — 4 tablas documentadas (`tm_d_get_earning`, `tm_d_jackpot_find`, `vc_d_games`, `tm_d_tickets`) | ✅ Documentado |
 | GGR GoldenRace: `stake - paid` — pendiente confirmar contra reporte oficial | ⚠️ Pendiente |
 | Join `tm_d_tickets.unit_extId = tm_d_get_earning.entityExtId` — pendiente confirmar (hay blancos en unit_extId) | ⚠️ Pendiente |
-| Documentar tablas `simulcast` schema | Media |
+| Schema `simulcast` — 2 tablas documentadas (`tm_d_bets_detail`, `tm_d_tickets`) | ✅ Documentado |
+| `simulcast.tm_d_tickets`: `transaction_type` (0-10) y `bet_status` (0-2) pendientes de confirmar | ⚠️ Pendiente |
+| `simulcast.tm_d_tickets`: `user_id` pendiente confirmar join con calimaco `user` | ⚠️ Pendiente |
 | Completar lógica Canal Teleservicio (schema `mvt`) | Media |
 | Confirmar significado de BetConstruct State values (3, 4, 2, 5, 1) | Baja |
 | Confirmar si `tm_d_daily_summary_users_machines` aplica a Retail | Baja |
