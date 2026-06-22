@@ -273,23 +273,33 @@ GROUP BY b.summary_date, b.machine, cm.name, cm.sub_provider, b.user
 | `provider` | STRING | Proveedor / canal de la apuesta | `'FIRST'` o `'altenar'` = Digital / `'FIRST_RETAIL'` = Retail |
 | `total_selections` | BIGINT | Cantidad de selecciones del ticket | — |
 | `type` | STRING | Tipo de apuesta | `'prematch'` / `'live'` / `'mixed'`. Las simples solo pueden ser prematch o live; las múltiples pueden ser mixed |
-| `created_date` | TIMESTAMP | Fecha de creación del ticket | — |
-| `resolved_date` | TIMESTAMP | Fecha de pago o resolución del ticket | ✅ Usar esta para análisis temporales de apuestas resueltas/pagadas |
+| `created_date` | TIMESTAMP | Fecha de creación del ticket (UTC) | ⚠️ Usar `created_date_pe` para hora Perú |
+| `created_date_pe` | TIMESTAMP | Fecha de creación del ticket en hora Perú | ✅ Usar esta para filtrar por fecha de apuesta |
+| `resolved_date` | TIMESTAMP | Fecha de resolución/pago (UTC) | ⚠️ Usar `resolved_date_pe` para hora Perú |
+| `resolved_date_pe` | TIMESTAMP | Fecha de resolución/pago en hora Perú | ✅ Usar esta para atribuir winning al día correcto |
 
 **Estados del ticket (`status`)**:
 
-| Categoría | Valores |
-|-----------|---------|
-| ❌ Inválidos — excluir | `'CANCELLED'`, `'REJECTED'`, `'VOIDED'`, `'REJECTED_PAID'`, `'VOIDED_PAID'` |
-| ✅ Válidos (ganados/pagados) | `'WON'`, `'WON_PAID'`, `'CASHOUT'`, `'PAID'` |
+| Categoría | Valores | Uso |
+|-----------|---------|-----|
+| ❌ Inválidos — excluir siempre | `'CANCELLED'`, `'REJECTED'`, `'VOIDED'`, `'REJECTED_PAID'`, `'VOIDED_PAID'` | Apuesta cancelada, rechazada o anulada |
+| ✅ Perdido | `'LOST'` | Ticket resuelto sin premio — incluir en wager y excluir de winning |
+| ✅ Ganados/pagados | `'WON'`, `'WON_PAID'`, `'CASHOUT'`, `'PAID'` | Incluir en wager Y en winning |
+| ⏳ Pendiente | `'OPEN'` | Aún no resuelto — incluir en wager, **NO** en winning |
+
+> ✅ **Regla confirmada (validada contra reporte oficial):**
+> - **Wager** → blacklist: `status NOT IN ('CANCELLED','REJECTED','VOIDED','REJECTED_PAID','VOIDED_PAID') AND wager > 0`
+> - **Winning** → whitelist: `status IN ('WON','WON_PAID','CASHOUT','PAID') AND winning > 0`
 
 **Filtros estándar por caso de uso**:
 ```sql
--- Solo apuestas válidas (excluir canceladas/rechazadas/anuladas)
+-- WAGER: blacklist — excluir solo los inválidos (incluye LOST, WON, OPEN, CASHOUT, etc.)
 WHERE status NOT IN ('CANCELLED','REJECTED','VOIDED','REJECTED_PAID','VOIDED_PAID')
+  AND wager > 0
 
--- Solo apuestas pagadas/ganadas
+-- WINNING: whitelist — solo los que efectivamente pagaron
 WHERE status IN ('WON','WON_PAID','CASHOUT','PAID')
+  AND winning > 0
 
 -- Solo canal Digital
 WHERE provider IN ('FIRST', 'altenar')
@@ -297,14 +307,21 @@ WHERE provider IN ('FIRST', 'altenar')
 -- Solo canal Retail
 WHERE provider = 'FIRST_RETAIL'
 
+-- Solo canal Teleservicio (TLS)
+WHERE company = 'ATPTS' AND provider IN ('FIRST', 'altenar')
+
 -- Montos en soles (siempre dividir entre 100)
 SELECT wager / 100 AS wager_soles, winning / 100 AS winning_soles
+
+-- Solo días cerrados (excluir el día de hoy en Lima)
+AND DATE(created_date_pe) < DATE(FROM_UTC_TIMESTAMP(NOW(), 'America/Lima'))
 ```
 
 **Advertencias**:
 - ⚠️ `wager`, `winning` y `total_prize` están en **centavos** — siempre dividir entre 100
 - ⚠️ Un `game` puede tener múltiples operaciones en otras tablas, pero aquí solo aparece la última — tener en cuenta al cruzar con tablas que sí muestren todas las operaciones
-- ⚠️ Para análisis de fecha usar `resolved_date` (cuándo se pagó/resolvió), no `created_date` (cuándo se creó el ticket)
+- ⚠️ Usar siempre `created_date_pe` y `resolved_date_pe` (hora Perú) — nunca `created_date` ni `resolved_date` (UTC)
+- ⚠️ Los tickets OPEN tienen wager válido pero aún no tienen winning — incluirlos en wager y excluirlos de winning
 - ⚠️ Excluir siempre `company = 'TEST'`
 - ⚠️ `provider` es la columna definitiva para distinguir Digital de Retail en esta tabla
 
@@ -389,24 +406,38 @@ Esta es una regla fundamental para calcular GGR correctamente.
 
 Como las fechas son **distintas**, se calculan en CTEs separados y se unen con **`FULL OUTER JOIN`**:
 
+> ✅ **Filtros confirmados y validados contra reporte oficial (diferencia < 1%):**
+> - **Wager**: blacklist `NOT IN ('CANCELLED','REJECTED','VOIDED','REJECTED_PAID','VOIDED_PAID')` AND `wager > 0`
+>   Incluye OPEN (apuestas pendientes) — excluirlos generaría ~0.3% de subconteo
+> - **Winning**: whitelist `IN ('WON','WON_PAID','CASHOUT','PAID')` AND `winning > 0`
+> - **Movements account**: `IN ('CASH','CASH-RETAIL')` cubre Digital Y Retail en una sola query
+
 ```sql
--- Una apuesta creada el lunes puede resolverse el miércoles.
--- El wager se atribuye al lunes, el winning al miércoles.
+-- Wager: blacklist — incluye OPEN, LOST, WON, CASHOUT, PAID
 sport_bets AS (
   SELECT DATE(d.created_date_pe) AS summary_date, d.user,
     SUM(d.wager) AS amount_wager
   FROM dlh_silver.calimaco.tm_d_users_bets_details d
-  ...
-  WHERE d.status NOT IN ('REJECTED','REJECTED_PAID','VOIDED','VOIDED_PAID','CANCELLED')
-  GROUP BY summary_date, d.user
+  WHERE d.company != 'TEST'
+    AND d.status NOT IN ('CANCELLED','REJECTED','VOIDED','REJECTED_PAID','VOIDED_PAID')
+    AND d.wager > 0
+    AND DATE(d.created_date_pe) BETWEEN '<fecha_inicio>' AND '<fecha_fin>'
+    -- Digital: AND d.provider IN ('FIRST','altenar')
+    -- Retail:  AND d.provider = 'FIRST_RETAIL'
+  GROUP BY DATE(d.created_date_pe), d.user
 ),
+-- Winning: whitelist — solo los efectivamente pagados
 sport_wins AS (
-  SELECT DATE(d.resolved_date_pe) AS summary_date, d.user,  -- fecha distinta
+  SELECT DATE(d.resolved_date_pe) AS summary_date, d.user,
     SUM(d.winning) AS amount_winning
   FROM dlh_silver.calimaco.tm_d_users_bets_details d
-  ...
-  WHERE d.winning > 0
-  GROUP BY summary_date, d.user
+  WHERE d.company != 'TEST'
+    AND d.status IN ('WON','WON_PAID','CASHOUT','PAID')
+    AND d.winning > 0
+    AND DATE(d.resolved_date_pe) BETWEEN '<fecha_inicio>' AND '<fecha_fin>'
+    -- Digital: AND d.provider IN ('FIRST','altenar')
+    -- Retail:  AND d.provider = 'FIRST_RETAIL'
+  GROUP BY DATE(d.resolved_date_pe), d.user
 ),
 sport_combined AS (
   SELECT
@@ -418,7 +449,21 @@ sport_combined AS (
   FULL OUTER JOIN sport_wins w
     ON b.summary_date = w.summary_date AND b.user = w.user
 )
--- GGR AD = amount_wager - amount_winning
+-- GGR AD = (amount_wager - amount_winning) / 100.0
+```
+
+**Filtro de movements (validar dinero real, no bonus)**:
+```sql
+-- Para Digital usar account = 'CASH'
+-- Para Retail usar account = 'CASH-RETAIL'  (NO 'CASH' — eso es solo Digital)
+-- Para ambos canales en una sola query: account IN ('CASH','CASH-RETAIL')
+AND EXISTS (
+  SELECT 1 FROM dlh_silver.calimaco.tm_d_movements m
+  WHERE m.db = d.db AND m.company = d.company
+    AND m.operation = d.operation AND m.user = d.user
+    AND m.account IN ('CASH','CASH-RETAIL')
+    AND m.periodo = '<YYYYMM>'
+)
 ```
 
 #### GGR Casino (`tm_d_operations`)
@@ -454,7 +499,70 @@ GGR Total = (wager_AD - winning_AD + wager_CAS - winning_CAS) / 100.0
 ```
 
 > ⚠️ `tm_d_operations.amount` es **POSITIVO** para type `'WAGER'` — distinto de `tm_d_movements.amount` que es negativo para débitos.
-> ⚠️ El join con `tm_d_movements` en ambos casos es **solo filtro** (`account = 'CASH'` = dinero real) — nunca usar `m.amount` como fuente de monto.
+> ⚠️ El join con `tm_d_movements` en Casino es **solo filtro** (`account = 'CASH'` = dinero real) — nunca usar `m.amount` como fuente de monto.
+
+---
+
+#### Query FIRST Retail GGR diario — confirmada y validada (~1% diferencia vs reporte oficial)
+
+```sql
+WITH
+
+-- WAGER: blacklist — incluye OPEN, LOST, WON, CASHOUT, PAID
+first_retail_bets AS (
+  SELECT
+    DATE(d.created_date_pe) AS fecha,
+    SUM(d.wager)            AS amount_wager
+  FROM dlh_silver.calimaco.tm_d_users_bets_details d
+  WHERE d.provider = 'FIRST_RETAIL'
+    AND d.company  != 'TEST'
+    AND d.status   NOT IN ('CANCELLED','REJECTED','VOIDED','REJECTED_PAID','VOIDED_PAID')
+    AND d.wager    > 0
+    AND DATE(d.created_date_pe) BETWEEN '<fecha_inicio>' AND '<fecha_fin>'
+    AND EXISTS (
+      SELECT 1 FROM dlh_silver.calimaco.tm_d_movements m
+      WHERE m.db = d.db AND m.company = d.company
+        AND m.operation = d.operation AND m.user = d.user
+        AND m.account IN ('CASH','CASH-RETAIL')
+        AND m.periodo = '<YYYYMM>'
+    )
+  GROUP BY DATE(d.created_date_pe)
+),
+
+-- WINNING: whitelist — solo los que efectivamente pagaron
+first_retail_wins AS (
+  SELECT
+    DATE(d.resolved_date_pe) AS fecha,
+    SUM(d.winning)           AS amount_winning
+  FROM dlh_silver.calimaco.tm_d_users_bets_details d
+  WHERE d.provider = 'FIRST_RETAIL'
+    AND d.company  != 'TEST'
+    AND d.status   IN ('WON','WON_PAID','CASHOUT','PAID')
+    AND d.winning  > 0
+    AND DATE(d.resolved_date_pe) BETWEEN '<fecha_inicio>' AND '<fecha_fin>'
+    AND EXISTS (
+      SELECT 1 FROM dlh_silver.calimaco.tm_d_movements m
+      WHERE m.db = d.db AND m.company = d.company
+        AND m.operation = d.operation AND m.user = d.user
+        AND m.account IN ('CASH','CASH-RETAIL')
+        AND m.periodo = '<YYYYMM>'
+    )
+  GROUP BY DATE(d.resolved_date_pe)
+)
+
+SELECT
+  COALESCE(b.fecha, w.fecha)                                              AS fecha,
+  COALESCE(b.amount_wager,   0) / 100.0                                  AS apostado,
+  COALESCE(w.amount_winning, 0) / 100.0                                  AS winning,
+  (COALESCE(b.amount_wager, 0) - COALESCE(w.amount_winning, 0)) / 100.0 AS ggr
+FROM first_retail_bets b
+FULL OUTER JOIN first_retail_wins w ON b.fecha = w.fecha
+ORDER BY fecha DESC
+```
+
+> ⚠️ Si el rango cubre más de un mes, cambiar `m.periodo = '<YYYYMM>'` por `m.periodo BETWEEN '<YYYYMM>' AND '<YYYYMM>'`.
+> ⚠️ Los tickets OPEN se capturan en el wager pero su winning aparecerá en días futuros — diferencia normal especialmente en días recientes.
+> ⚠️ `account = 'CASH-RETAIL'` es obligatorio para Retail. `account = 'CASH'` solo aplica a Digital.
 
 ---
 
