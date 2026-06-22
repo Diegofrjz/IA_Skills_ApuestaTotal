@@ -51,12 +51,37 @@ Las tablas de streaming son el equivalente en tiempo real de las tablas `tm_d_..
 | `tm_d_...` | Tablas históricas procesadas (día cerrado) | Días anteriores al día de hoy |
 | `tm_s_...` | Tablas streaming (tiempo real, día en curso) | El día de hoy — datos aún no cerrados |
 
-**Tablas streaming confirmadas**:
-- `dlh_silver.calimaco.tm_s_movements` — mismas columnas que `tm_d_movements`
-- `dlh_silver.calimaco.tm_s_operations` — mismas columnas que `tm_d_operations`
-- `dlh_silver.calimaco.tm_s_users_promotions` — mismas columnas que `tm_d_users_promotions`
+**Tablas streaming confirmadas** (todas en `dlh_silver.calimaco`):
+
+| Tabla streaming | Equivalente histórico |
+|---|---|
+| `tm_s_movements` | `tm_d_movements` |
+| `tm_s_operations` | `tm_d_operations` |
+| `tm_s_users_promotions` | `tm_d_users_promotions` |
+| `tm_s_users_bets_details` | `tm_d_users_bets_details` |
+| `tm_s_users_bets_selections` | `tm_d_users_bets_selections` |
+| `tm_s_users` | `tm_d_users` |
+
+**Sin equivalente streaming** (solo existen como `tm_d_...`):
+- `calimaco.tm_d_daily_summary_users_details` — resumen generado al cierre del día
+- `calimaco.tm_d_daily_summary_users_machines` — resumen generado al cierre del día
+- `calimaco.tm_d_daily_summary_users_machines_accounts` — resumen generado al cierre del día (desglose por account)
+- `betconstruct.tm_d_bet` — no tiene streaming
+- `golden_race.tm_d_get_earning`, `tm_d_jackpot_find`, `tm_d_tickets` — no tienen streaming
+- `simulcast.tm_d_bets_detail`, `tm_d_tickets` — no tienen streaming
 
 **Regla de uso**: Para queries que abarcan días históricos + el día de hoy, usar `UNION ALL` entre la tabla `tm_d_...` (días anteriores) y la `tm_s_...` (hoy).
+
+> 🚫 **Regla crítica**: **NUNCA usar tablas `tm_s_...` por defecto.** Usar siempre las tablas `tm_d_...` (históricas/granulares). Solo usar streaming cuando el usuario lo pida explícitamente.
+
+> 🚫 **Regla crítica**: **NUNCA usar las siguientes tablas resumen por iniciativa propia.** Usar siempre las tablas granulares. Solo usarlas cuando el usuario lo pida explícitamente:
+> - `tm_d_daily_summary_users_details` (Digital)
+> - `tm_d_daily_summary_users_machines` (Digital — casino por máquina)
+> - `tm_d_daily_summary_users_machines_accounts` (Digital — casino por máquina y tipo de dinero)
+> - `user_summary_retail_daily` (Retail)
+> - `user_store_summary_retail_daily` (Retail)
+
+> ⚠️ **Las tablas `tm_s_...` solo retienen las últimas 24 horas de datos.** No usar para consultar más de un día atrás — para eso siempre usar `tm_d_...`.
 
 > ⚠️ `tm_d_daily_summary_users_details` **NO tiene equivalente streaming** — es una tabla resumen que solo se genera cuando el día cierra. Para el día en curso, calcular desde `tm_s_movements` + `tm_s_operations` usando `account` para distinguir CASH de CASINO-BONUS y `machine IS NOT NULL AND machine NOT IN ('27453', '27469')` para identificar casino.
 
@@ -147,6 +172,81 @@ Cuando el usuario haga una consulta de datos, debes:
 - ⚠️ Usar `summary_date_pe` (horario Perú), nunca `summary_date` (horario España)
 - ⚠️ **Filtro obligatorio para cuadre con tabla details**: `machine NOT IN ('27453', '27469')` — excluye máquinas de FIRST y La Penka que no son casino real
 - ⚠️ Joins con otras tablas: usar `user + db + company + operation` (ver regla fundamental de joins)
+
+---
+
+### calimaco.tm_d_daily_summary_users_machines_accounts
+**Ruta completa**: `dlh_silver.calimaco.tm_d_daily_summary_users_machines_accounts`
+
+> **Descripción**: Resumen diario del uso de máquinas de casino por usuario, con desglose por tipo de dinero (`account`). Versión más granular de `tm_d_daily_summary_users_machines` — permite separar lo apostado/ganado con dinero real (`CASH`) de lo apostado/ganado con bono (`CASINO-BONUS`) a nivel de máquina.
+> **Granularidad**: 1 fila = 1 usuario × 1 máquina × 1 `account` × 1 día
+> **Actualización**: Diaria
+> **Fuente origen**: Back Office Calimaco
+> **Canal**: Digital (casino)
+> **Relación**: Se une a `tc_n_machines` por `machine` para obtener nombre, tipo y proveedor de la máquina
+
+| Columna | Tipo | Descripción | Valores / Notas |
+|---------|------|-------------|-----------------|
+| `summary_date` | DATE | Fecha del resumen **ya en hora Perú** | ✅ Usar directamente — no tiene `summary_date_pe` |
+| `company` | STRING | ID de la compañía | Excluir siempre `'TEST'` |
+| `machine` | STRING | ID de la máquina | FK hacia `tc_n_machines.machine` |
+| `currency` | STRING | Moneda | Siempre `'PEN'` — se puede omitir en el filtro |
+| `user` | STRING | ID del usuario | FK para cruces con otras tablas |
+| `account` | STRING | Tipo de dinero | `'CASH'` = dinero real · `'CASINO-BONUS'` = bono de casino |
+| `wagers_count` | BIGINT | Número de apuestas | — |
+| `wagers` | BIGINT | Monto apostado **en centavos** | ⚠️ Dividir entre 100 para soles |
+| `winnings` | BIGINT | Monto ganado **en centavos** | ⚠️ Dividir entre 100 para soles |
+
+**Filtros obligatorios**:
+```sql
+WHERE company  = 'ATP'
+  AND account  IN ('CASH', 'CASINO-BONUS')
+  AND machine  NOT IN ('27453', '27469')  -- excluir FIRST y La Penka
+```
+
+**Uso típico — desglose CASH vs BONUS por máquina y usuario**:
+```sql
+SELECT
+  b.summary_date,
+  b.machine,
+  cm.name          AS nombre_maquina,
+  cm.sub_provider,
+  b.user,
+
+  SUM(CASE WHEN b.account = 'CASH'         THEN b.wagers_count ELSE 0 END) AS cash_count,
+  SUM(CASE WHEN b.account = 'CASH'         THEN b.wagers       ELSE 0 END) / 100.0 AS cash_wagers,
+  SUM(CASE WHEN b.account = 'CASH'         THEN b.winnings     ELSE 0 END) / 100.0 AS cash_winnings,
+  SUM(CASE WHEN b.account = 'CASINO-BONUS' THEN b.wagers_count ELSE 0 END) AS bonus_count,
+  SUM(CASE WHEN b.account = 'CASINO-BONUS' THEN b.wagers       ELSE 0 END) / 100.0 AS bonus_wagers,
+  SUM(CASE WHEN b.account = 'CASINO-BONUS' THEN b.winnings     ELSE 0 END) / 100.0 AS bonus_winnings,
+
+  -- GGR solo dinero real
+  (SUM(CASE WHEN b.account = 'CASH' THEN b.wagers   ELSE 0 END)
+ - SUM(CASE WHEN b.account = 'CASH' THEN b.winnings ELSE 0 END)) / 100.0 AS cash_margin
+
+FROM dlh_silver.calimaco.tm_d_daily_summary_users_machines_accounts b
+INNER JOIN dlh_silver.calimaco.tc_n_machines cm ON b.machine = cm.machine
+WHERE b.company = 'ATP'
+  AND b.account IN ('CASH', 'CASINO-BONUS')
+  AND b.machine NOT IN ('27453', '27469')
+  AND b.summary_date BETWEEN '2026-01-01' AND '2026-01-05'
+GROUP BY b.summary_date, b.machine, cm.name, cm.sub_provider, b.user
+```
+
+**Advertencias**:
+- ⚠️ `wagers` y `winnings` en **centavos** — dividir entre 100
+- ⚠️ Filtro obligatorio: `machine NOT IN ('27453', '27469')` — excluye FIRST y La Penka que no son casino real
+- ⚠️ `summary_date` ya está en hora Perú — no necesita conversión
+- ⚠️ Excluir siempre `company = 'TEST'`
+- ⚠️ No usar por defecto — es tabla resumen. Usar las tablas granulares (`tm_d_operations`) salvo que el usuario lo pida explícitamente
+
+**Cuándo usar esta tabla vs `tm_d_daily_summary_users_machines`**:
+
+| Necesidad | Tabla |
+|-----------|-------|
+| Apostado total (CASH + BONUS) por máquina | `tm_d_daily_summary_users_machines` |
+| Separar CASH de CASINO-BONUS por máquina | `tm_d_daily_summary_users_machines_accounts` ← esta |
+| GGR solo con dinero real por máquina | `tm_d_daily_summary_users_machines_accounts` ← esta |
 
 ---
 
@@ -249,6 +349,112 @@ FILTRO OBLIGATORIO EN B: machine NOT IN ('27453', '27469')
 FILTRO OBLIGATORIO EN AMBAS: company != 'TEST'
 FECHA A USAR: summary_date_pe
 ```
+
+---
+
+### Regla: `tm_d_movements.amount` es negativo para apuestas (débitos)
+
+En la tabla `tm_d_movements`, los montos de operaciones de tipo **débito** (apuestas, wagers) se almacenan como **valores negativos**, porque representan dinero que sale de la cuenta del jugador.
+
+Consecuencia directa:
+- `SUM(m.amount / 100.0)` para apuestas dará un valor **negativo**
+- Una condición `cash_casinobets + bonus_casinobets > 0` **nunca será verdadera** para apuestas → jugadores_cas = 0 incorrectamente
+
+**Corrección al calcular apostado desde `tm_d_movements` o `tm_s_movements`**:
+```sql
+-- ❌ Incorrecto — resultado negativo
+SUM(CASE WHEN m.account = 'CASH' THEN m.amount / 100.0 ELSE 0 END) AS cash_casinobets
+
+-- ✅ Correcto — negar el valor para obtener positivo
+SUM(CASE WHEN m.account = 'CASH' THEN -m.amount / 100.0 ELSE 0 END) AS cash_casinobets
+```
+
+> 💡 **Alternativa preferida para días cerrados**: usar `tm_d_daily_summary_users_details` (columnas `total_cash_casinobets`, `total_bonus_casinobets`) — ya almacena los montos como valores positivos absolutos, es más rápida y no requiere join.
+
+> ✅ **Regla: el monto apostado siempre viene de `wager`** en `tm_d_users_bets_details` o `tm_d_users_bets_selections`. El join con `tm_d_movements` se usa **solo como filtro** (`account = 'CASH'` para dinero real, `account = 'CASINO-BONUS'` para bono) — nunca usar `m.amount` como fuente de apostado en queries de apuestas deportivas.
+
+---
+
+### Regla: GGR Deportivas y Casino — fechas distintas, fuentes distintas
+
+Esta es una regla fundamental para calcular GGR correctamente.
+
+> 🚫 **Solo para GGR Deportivas**: el wager y el winning ocurren en fechas distintas → **obligatorio FULL OUTER JOIN**.
+> ✅ **Para GGR Casino**: wager y winning están en la misma tabla y misma fecha → **NO necesita FULL OUTER JOIN**, basta un GROUP BY.
+
+#### GGR Deportivas (`tm_d_users_bets_details`)
+
+- **Wager** → fecha `created_date_pe` (día que se apostó)
+- **Winning** → fecha `resolved_date_pe` (día que se pagó/resolvió)
+
+Como las fechas son **distintas**, se calculan en CTEs separados y se unen con **`FULL OUTER JOIN`**:
+
+```sql
+-- Una apuesta creada el lunes puede resolverse el miércoles.
+-- El wager se atribuye al lunes, el winning al miércoles.
+sport_bets AS (
+  SELECT DATE(d.created_date_pe) AS summary_date, d.user,
+    SUM(d.wager) AS amount_wager
+  FROM dlh_silver.calimaco.tm_d_users_bets_details d
+  ...
+  WHERE d.status NOT IN ('REJECTED','REJECTED_PAID','VOIDED','VOIDED_PAID','CANCELLED')
+  GROUP BY summary_date, d.user
+),
+sport_wins AS (
+  SELECT DATE(d.resolved_date_pe) AS summary_date, d.user,  -- fecha distinta
+    SUM(d.winning) AS amount_winning
+  FROM dlh_silver.calimaco.tm_d_users_bets_details d
+  ...
+  WHERE d.winning > 0
+  GROUP BY summary_date, d.user
+),
+sport_combined AS (
+  SELECT
+    COALESCE(b.summary_date, w.summary_date) AS summary_date,
+    COALESCE(b.user, w.user)                 AS user,
+    COALESCE(b.amount_wager, 0)              AS amount_wager,
+    COALESCE(w.amount_winning, 0)            AS amount_winning
+  FROM sport_bets b
+  FULL OUTER JOIN sport_wins w
+    ON b.summary_date = w.summary_date AND b.user = w.user
+)
+-- GGR AD = amount_wager - amount_winning
+```
+
+#### GGR Casino (`tm_d_operations`)
+
+- **Fuente**: `tm_d_operations` (NO `tm_d_users_bets_details`)
+- **Wager**: `type = 'WAGER'` → `amount` (positivo en esta tabla)
+- **Winning**: `type = 'WINNING'` → `amount`
+- **Ambos en la misma fecha** (`operation_date_pe`) → no necesita FULL OUTER JOIN
+- **Distinción casino vs deportivas**: `provider NOT IN ('altenar', 'FIRST', 'first')` — todo lo que NO es proveedor deportivo = casino
+
+```sql
+casino AS (
+  SELECT DATE(o.operation_date_pe) AS summary_date, o.user,
+    SUM(CASE WHEN type = 'WAGER'   THEN o.amount ELSE 0 END) AS amount_casino_wager,
+    SUM(CASE WHEN type = 'WINNING' THEN o.amount ELSE 0 END) AS amount_casino_winning
+  FROM dlh_silver.calimaco.tm_d_operations o
+  INNER JOIN dlh_silver.calimaco.tm_d_movements m
+    ON o.db = m.db AND o.company = m.company AND o.operation = m.operation
+    AND m.account = 'CASH' AND m.periodo >= '202601'
+  WHERE o.type IN ('WAGER','WINNING')
+    AND o.provider IS NOT NULL
+    AND o.provider NOT IN ('altenar','FIRST','first')
+    AND o.company = 'ATP'
+  GROUP BY summary_date, o.user
+)
+-- GGR CAS = amount_casino_wager - amount_casino_winning
+```
+
+#### GGR Total
+
+```
+GGR Total = (wager_AD - winning_AD + wager_CAS - winning_CAS) / 100.0
+```
+
+> ⚠️ `tm_d_operations.amount` es **POSITIVO** para type `'WAGER'` — distinto de `tm_d_movements.amount` que es negativo para débitos.
+> ⚠️ El join con `tm_d_movements` en ambos casos es **solo filtro** (`account = 'CASH'` = dinero real) — nunca usar `m.amount` como fuente de monto.
 
 ---
 
@@ -618,13 +824,13 @@ tc_n_machines  ──(machine)──  tc_n_machines_tags_machines  ──(tag + 
 | `company` | STRING | Canal | Excluir `'TEST'` |
 | `first_name` | STRING | Primer nombre | — |
 | `middle_name` | STRING | Segundo nombre | — |
-| `last_name_encrypted` | STRING | Apellido encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text()` |
-| `alias_encrypted` | STRING | Alias encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text()` |
-| `email_encrypted` | STRING | Correo electrónico encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text()` |
-| `mobile_encrypted` | STRING | Celular encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text()` |
-| `national_id_encrypted` | STRING | DNI encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text()`. Puede usarse para cruces pero no es la clave principal |
+| `last_name_encrypted` | STRING | Apellido encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text(last_name_encrypted)` |
+| `alias_encrypted` | STRING | Alias encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text(alias_encrypted)` |
+| `email_encrypted` | STRING | Correo electrónico encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text(email_encrypted)` |
+| `mobile_encrypted` | STRING | Celular encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text(mobile_encrypted)` |
+| `national_id_encrypted` | STRING | DNI encriptado | Desencriptar con `dlh_silver.crypto.decrypt_text(national_id_encrypted)`. Puede usarse para cruces pero no es la clave principal |
 | `national_id_type` | STRING | Tipo de documento de identidad | — |
-| `address_encrypted` | STRING | Dirección domiciliaria encriptada | Desencriptar con `dlh_silver.crypto.decrypt_text()` |
+| `address_encrypted` | STRING | Dirección domiciliaria encriptada | Desencriptar con `dlh_silver.crypto.decrypt_text(address_encrypted)` |
 | `regulatory_status` | STRING | Estado regulatorio según normativa | `'ABIERTO'`, `'CERRADO'`, `'SUSPENDIDO'`, `'PROHIBIDO'`, entre otros |
 | `birthday` | TIMESTAMP | Fecha de nacimiento | Formato ISO 8601: `1994-07-11T00:00:00.000+00:00`. Usar `DATE(birthday)` para operar con ella |
 | `gender` | STRING | Género | — |
@@ -635,6 +841,7 @@ tc_n_machines  ──(machine)──  tc_n_machines_tags_machines  ──(tag + 
 | `province` | STRING | Provincia | — |
 | `nationality` | STRING | Nacionalidad | — |
 | `promotion` | STRING | Código de promoción aplicada al registrarse | — |
+| `last_device` | STRING | Último dispositivo utilizado por el usuario | ✅ Confirmado. Pendiente confirmar valores exactos (probablemente `'M'` = Mobile / `'D'` = Desktop, igual que `useragent` en `tm_d_operations`) |
 | `created_date_pe` | TIMESTAMP | Fecha de creación de la cuenta en hora Perú | Formato `2026-02-28 14:45:00.000`. Usar `DATE()` al filtrar |
 | `modified_date_pe` | TIMESTAMP | Fecha de última modificación en hora Perú | Mismo formato TIMESTAMP |
 
@@ -642,8 +849,8 @@ tc_n_machines  ──(machine)──  tc_n_machines_tags_machines  ──(tag + 
 ```sql
 SELECT
     u.first_name,
-    dlh_silver.crypto.decrypt_text(u.last_name_encrypted)  AS apellido,
-    dlh_silver.crypto.decrypt_text(u.email_encrypted)      AS email,
+    dlh_silver.crypto.decrypt_text(u.last_name)  AS apellido,
+    dlh_silver.crypto.decrypt_text(u.email)      AS email,
     u.regulatory_status,
     u.gender,
     u.city,
@@ -659,7 +866,7 @@ GROUP BY 1, 2, 3, 4, 5, 6
 ```
 
 **Advertencias**:
-- ⚠️ Las columnas `_encrypted` deben desencriptarse con `dlh_silver.crypto.decrypt_text()` antes de mostrarlas — nunca exponer el valor encriptado directamente
+- ⚠️ Las columnas encriptadas (`last_name_encrypted`, `email_encrypted`, `mobile_encrypted`, `alias_encrypted`, `national_id_encrypted`, `address_encrypted`) deben desencriptarse con `dlh_silver.crypto.decrypt_text()` antes de mostrarlas — nunca exponer el valor encriptado directamente.
 - ⚠️ `birthday` tiene formato ISO 8601 con timezone (`+00:00`) — usar `DATE(birthday)` para cálculos de edad o filtros por fecha
 - ⚠️ El join con tablas transaccionales es por `user + db + company` (no incluye `operation`)
 - ⚠️ Excluir siempre `company = 'TEST'`

@@ -133,8 +133,12 @@ SELECT fecha, valor FROM (nivel 2) WHERE rn = 1
 | Tarea | Prioridad |
 |-------|-----------|
 | ⚠️ Confirmar `type = 'REDEEM'` como retiros retail en `tm_d_operations` | Alta |
+| **FIRST GGR**: correr Query 6 (breakdown por status) para identificar qué 4 statuses entran y si alguno tiene `winning` inflado | Alta |
+| **GoldenRace**: correr Query 7 con filtro `entityName LIKE 'RedAT%' OR entityName LIKE 'AgenteAT%'` (sin nombres de personas = agentes padre) y comparar vs reporte oficial | Alta |
+| **GGR por evento (prorrateo)**: para calcular GGR correcto por evento en apuestas múltiples, el usuario mostrará la forma correcta de prorratear. Pendiente implementar. | Alta |
+| **BetConstruct GGR**: pendiente documentación externa que el usuario va a buscar | Media |
+| **Simulcast GGR**: pendiente documentación externa que el usuario va a buscar | Media |
 | Schema `golden_race` — 4 tablas documentadas (`tm_d_get_earning`, `tm_d_jackpot_find`, `vc_d_games`, `tm_d_tickets`) | ✅ Documentado |
-| GGR GoldenRace: `stake - paid` — pendiente confirmar contra reporte oficial | ⚠️ Pendiente |
 | Join `tm_d_tickets.unit_extId = tm_d_get_earning.entityExtId` — pendiente confirmar (hay blancos en unit_extId) | ⚠️ Pendiente |
 | Schema `simulcast` — 2 tablas documentadas (`tm_d_bets_detail`, `tm_d_tickets`) | ✅ Documentado |
 | `simulcast.tm_d_tickets`: `transaction_type` (0-10) y `bet_status` (0-2) pendientes de confirmar | ⚠️ Pendiente |
@@ -143,6 +147,25 @@ SELECT fecha, valor FROM (nivel 2) WHERE rn = 1
 | Confirmar significado de BetConstruct State values (3, 4, 2, 5, 1) | Baja |
 | Confirmar si `tm_d_daily_summary_users_machines` aplica a Retail | Baja |
 | Completar GLOSARIO DE TÉRMINOS (actualmente con ejemplos placeholder) | Baja |
+
+### Queries listas para retomar (raw retail KPI)
+```
+Query 6 — FIRST status breakdown:
+SELECT status, COUNT(DISTINCT game) AS tickets, SUM(wager)/100.0 AS apostado,
+  SUM(winning)/100.0 AS winning, SUM(wager-winning)/100.0 AS ggr
+FROM dlh_silver.calimaco.tm_d_users_bets_details
+WHERE provider='FIRST_RETAIL' AND company!='TEST'
+  AND DATE(FROM_UTC_TIMESTAMP(created_date,'America/Lima')) BETWEEN '2026-06-01' AND '2026-06-16'
+GROUP BY status ORDER BY apostado DESC
+
+Query 7 — GoldenRace entidades corregidas:
+SELECT DATE(startDate_pe) AS fecha, SUM(stake) AS apostado,
+  SUM(stake-paid) AS ggr, SUM(playedTickets) AS tx
+FROM dlh_silver.golden_race.tm_d_get_earning
+WHERE DATE(startDate_pe) BETWEEN '2026-06-01' AND '2026-06-16'
+  AND (entityName LIKE 'RedAT%' OR entityName LIKE 'AgenteAT%')
+GROUP BY DATE(startDate_pe) ORDER BY fecha
+```
 
 ---
 
@@ -154,3 +177,7 @@ SELECT fecha, valor FROM (nivel 2) WHERE rn = 1
 4. **`summary_date_pe`** es TIMESTAMP, no DATE: usar `DATE()` al filtrar o comparar.
 5. **Player ID** retail siempre con guion bajo: `CONCAT(document_type, '_', document_id)`.
 6. **Centavos**: calimaco tables → ÷100. BetConstruct y copper → ya en soles.
+7. **Tablas `tm_s_...` (streaming) solo retienen 24h de datos**: no usarlas para consultar más de un día atrás — usar siempre `tm_d_...` para histórico.
+   - **Con streaming (calimaco)**: `tm_s_movements`, `tm_s_operations`, `tm_s_users_promotions`, `tm_s_users_bets_details`, `tm_s_users_bets_selections`, `tm_s_users`
+   - **Sin streaming**: `tm_d_daily_summary_users_details`, `tm_d_daily_summary_users_machines`, todas las de `betconstruct`, `golden_race` y `simulcast`
+8. **`tm_d_movements.amount` es negativo para débitos (apuestas/wagers)**: usar `-m.amount/100.0` o `ABS(m.amount/100.0)`. Si se usa el valor crudo, las sumas salen negativas y condiciones `> 0` nunca se cumplen. Preferir `tm_d_daily_summary_users_details` para días cerrados (ya almacena positivos).
